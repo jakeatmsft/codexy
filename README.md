@@ -9,7 +9,7 @@
   <a href="README_ZH.md">中文文档</a> | <b>English</b>
 </p>
 
-<p align="center"><code>pip install -U codexy</code></p>
+<p align="center"><code>python -m pip install -e .</code></p>
 
 ![Codexy demo GIF](./assets/codexy-demo.gif)
 
@@ -58,53 +58,88 @@ Help us improve by filing issues or submitting PRs (see the Contributing section
 
 ## Quickstart
 
-Install globally using pip:
+Install **this local checkout** with Python 3.10+ and pip:
 
 ```shell
-pip install -U codexy
+python -m pip install -e .
+python -m codexy
+# Or start with a prompt:
+python -m codexy "explain this codebase to me"
 ```
 
-Next, set your OpenAI API key as an environment variable:
+No new Python dependencies are added; the existing OpenAI SDK requires version 1.75+ for Responses support. If they are already
+installed and you want pip to install only Codexy, use
+`python -m pip install --no-deps -e .`. The existing `pdm-backend` build requirement
+may be installed by pip in an isolated build environment. No uv or Codex CLI is
+required. Use `python3` on Linux/WSL or `py` on Windows if needed. For isolation,
+create and activate a virtual environment with `python -m venv .venv` first.
+
+### Foundry endpoint and Microsoft Entra authentication
+
+Copy `.env.example` to `.env` if you have not configured it yet, then set your
+resource endpoint and **deployment name**:
+
+```dotenv
+CODEXY_AUTH_MODE=entra
+AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT_NAME=YOUR-DEPLOYMENT
+CODEXY_APPROVAL_MODE=suggest
+OPENAI_TIMEOUT_MS=60000
+CODEXY_CHECK_UPDATES=false
+```
+
+A resource endpoint ending in `.services.ai.azure.com` also works. Supply the
+resource root or the complete `/openai/v1/` base URL, rather than a Foundry
+project URL or a deployment-specific Chat Completions URL. Codexy uses the
+OpenAI-compatible v1 Responses API, so no `api-version` setting is needed.
+The deployment must support Responses, streaming, and function tools. Codexy keeps tool execution and approvals in Python.
+
+Use an installed Azure CLI to sign in:
 
 ```shell
-export OPENAI_API_KEY="your-api-key-here"
-# Optional: Set a custom base URL for the OpenAI API (e.g., for a proxy or self-hosted service)
-# export OPENAI_BASE_URL="your-custom-base-url"
-# Optional: Set the API request timeout in milliseconds
-# export OPENAI_TIMEOUT_MS="300000" # e.g., 300000 for 5 minutes
+az login
+# For a specific tenant:
+# az login --tenant YOUR-TENANT-ID
+python -m codexy
 ```
 
-> **Note:** This command sets the key only for your current terminal session. To make it permanent, add the `export` line to your shell's configuration file (e.g., `~/.zshrc`, `~/.bashrc`).
->
-> **Tip:** You can also place your API key and other environment variables into a `.env` file at the root of your project:
->
-> ```env
-> OPENAI_API_KEY=your-api-key-here
-> # Optional:
-> # OPENAI_BASE_URL=your-custom-base-url
-> # OPENAI_TIMEOUT_MS=300000
-> ```
->
-> The CLI will automatically load variables from `.env` using `python-dotenv`.
+The signed-in identity needs permission to invoke the deployment, such as the
+**Cognitive Services OpenAI User** role on the resource. Codexy obtains tokens
+with `az account get-access-token` for `https://cognitiveservices.azure.com/`,
+caches them in memory, refreshes before expiry, and retries authentication once
+after a 401. No Azure Python SDK or additional Python dependency is required. Responses use `store=false`; reasoning context needed for tool continuations stays in memory.
+Tokens are not stored in `.env`. The Codex application and its login are not used.
 
-Run interactively:
+Optional `.env` settings select `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`AZURE_CONFIG_DIR`, `AZURE_CLI_COMMAND` (an executable path), and
+`AZURE_TOKEN_RESOURCE` (for a different Azure cloud/audience). Use Azure CLI
+from the same OS user/environment where you signed in. The model picker shows
+the configured deployment; `--model` or `CODEXY_MODEL` can select another
+existing deployment.
 
-```shell
-codexy
+### Optional API-key backend
+
+For an OpenAI-compatible Chat Completions service, configure:
+
+```dotenv
+CODEXY_AUTH_MODE=api-key
+OPENAI_API_KEY=your-api-key
+CODEXY_MODEL=o4-mini
+# OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-Or, run with a prompt as input (and optionally in `Full Auto` mode):
+### Environment configuration
 
-```shell
-codexy "explain this codebase to me"
-```
+Configuration precedence is CLI flags, exported environment variables, `.env`,
+stored JSON/YAML settings, then defaults. Entra mode uses the configured Azure
+deployment instead of a stored public model name. `.env` is read from the working
+directory on each configuration load. To select another file, export
+`CODEXY_ENV_FILE=/absolute/path/to/.env`. `.env` files are ignored by Git.
 
-```shell
-# Be cautious with auto-approval modes
-codexy --approval-mode full-auto "create the fanciest todo-list app"
-```
-
-That's it – Codexy will interact with the OpenAI API, suggest file changes or commands, and (depending on your approval mode) execute them.
+Besides the settings above, `.env` supports `CODEXY_FULL_STDOUT`,
+`CODEXY_DISABLE_PROJECT_DOC`, and `CODEXY_NOTIFY` (`true`/`false`). Automatic PyPI
+update checks are disabled by default. `OPENAI_TIMEOUT_MS` must be a positive
+integer and controls API requests and Azure CLI token acquisition.
 
 ---
 
@@ -146,7 +181,8 @@ Codexy will show a warning/confirmation if you start in `auto-edit`, `full-auto`
 | ------------- | ------------------------------------------ |
 | Operating Sys | Linux, macOS, Windows (cross-platform)     |
 | Python        | **3.10 or newer** (see `pyproject.toml`)   |
-| Pip           | For installation                           |
+| pip           | Install the local checkout                  |
+| Azure CLI     | Required for Microsoft Entra authentication  |
 | Git (optional)| Recommended for safety                     |
 | Dependencies  | `click`, `textual`, `openai`, etc.         |
 

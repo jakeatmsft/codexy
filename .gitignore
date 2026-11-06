@@ -175,3 +175,8 @@ coverage/
 
 .pdm-python
 pdm.lock
+
+# Local runtime configuration; keep the template in version control.
+.env
+.env.*
+!.env.example

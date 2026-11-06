@@ -4,13 +4,12 @@ import json
 import os
 from pathlib import Path
 from typing import TypedDict
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from .approvals import ApprovalMode
-
-load_dotenv(Path.cwd() / ".env")
 
 # Default values
 DEFAULT_AGENTIC_MODEL = "o4-mini"
@@ -37,11 +36,6 @@ CONFIG_JSON_FILEPATH = CONFIG_DIR / "config.json"
 CONFIG_YAML_FILEPATH = CONFIG_DIR / "config.yaml"
 CONFIG_YML_FILEPATH = CONFIG_DIR / "config.yml"
 INSTRUCTIONS_FILEPATH = CONFIG_DIR / "instructions.md"
-
-# Environment variables
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
-OPENAI_TIMEOUT_MS = int(os.environ.get("OPENAI_TIMEOUT_MS", 0)) or None
 
 # Project doc settings
 PROJECT_DOC_FILENAMES = ["codex.md", ".codex.md", "CODEX.md"]
@@ -85,6 +79,14 @@ class StoredConfig(TypedDict, total=False):
 class AppConfig(TypedDict):
     """Represents the fully resolved runtime configuration."""
 
+    auth_mode: str
+    azure_cli_command: str
+    azure_tenant_id: str | None
+    azure_subscription_id: str | None
+    azure_config_dir: str | None
+    azure_token_resource: str
+    cwd: str
+    check_updates: bool
     api_key: str | None
     model: str
     instructions: str
@@ -123,6 +125,19 @@ EMPTY_STORED_CONFIG: StoredConfig = {
 
 
 # --- Helper Functions ---
+
+
+def normalize_foundry_endpoint(endpoint: str | None) -> str | None:
+    """Accept a resource endpoint or its OpenAI v1 base URL."""
+    if not endpoint or not endpoint.strip():
+        return None
+    parsed = urlsplit(endpoint.strip())
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must be an HTTPS resource URL without credentials, query, or fragment.")
+    path = parsed.path.rstrip("/")
+    if path not in {"", "/openai/v1"}:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must be the resource root or end in /openai/v1/.")
+    return urlunsplit((parsed.scheme, parsed.netloc, "/openai/v1/", "", ""))
 
 
 def _discover_project_doc_path(start_dir: Path) -> Path | None:
@@ -189,13 +204,37 @@ def load_config(
     project_doc_path: Path | None = None,
     is_full_context: bool = False,
     flex_mode: bool = False,
-    full_stdout: bool = DEFAULT_FULL_STDOUT,  # Use default
+    full_stdout: bool | None = None,
 ) -> AppConfig:
     """Loads the application configuration from file and environment."""
     # Determine current working directory if not provided
     current_cwd = (cwd or Path.cwd()).resolve()
+    # Read on each load; do not leak one project's .env into another project.
+    env_path = Path(os.environ.get("CODEXY_ENV_FILE", current_cwd / ".env")).expanduser()
+    if not env_path.is_absolute():
+        env_path = current_cwd / env_path
+    env = {**dotenv_values(env_path), **os.environ}
 
-    actual_config_path: Path = CONFIG_JSON_FILEPATH
+    def env_bool(name: str, default: bool) -> bool:
+        value = env.get(name)
+        if value is None or not value.strip():
+            return default
+        if value.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+        if value.strip().lower() in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"{name} must be true or false.")
+
+    auth_mode = (env.get("CODEXY_AUTH_MODE") or "entra").strip().lower()
+    if auth_mode not in {"entra", "api-key"}:
+        raise ValueError("CODEXY_AUTH_MODE must be entra or api-key.")
+    try:
+        timeout_ms = int(env.get("OPENAI_TIMEOUT_MS") or "60000")
+        if timeout_ms <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError("OPENAI_TIMEOUT_MS must be a positive integer in milliseconds.") from exc
+
     if config_path is None:
         if CONFIG_YAML_FILEPATH.exists():
             config_path = CONFIG_YAML_FILEPATH
@@ -203,8 +242,7 @@ def load_config(
             config_path = CONFIG_YML_FILEPATH
         else:
             config_path = CONFIG_JSON_FILEPATH  # Default to JSON
-    else:
-        actual_config_path = config_path.resolve()  # Ensure absolute path
+    actual_config_path = config_path.resolve()
 
     # Determine instructions path if not provided
     actual_instructions_path = (instructions_path or INSTRUCTIONS_FILEPATH).resolve()
@@ -243,7 +281,7 @@ def load_config(
     # --- Project Doc Loading ---
     project_doc = ""
     actual_project_doc_path: Path | None = None
-    should_load_project_doc = not disable_project_doc and os.environ.get("CODEXY_DISABLE_PROJECT_DOC") != "1"
+    should_load_project_doc = not disable_project_doc and not env_bool("CODEXY_DISABLE_PROJECT_DOC", False)
 
     if should_load_project_doc:
         if project_doc_path:  # Explicit path provided
@@ -271,11 +309,15 @@ def load_config(
     combined_instructions = "\n\n".join(combined_instructions_parts) or DEFAULT_INSTRUCTIONS
 
     # --- Merging Config ---
-    stored_model = stored_config.get("model")
+    stored_model = (
+        env.get("CODEXY_MODEL") or env.get("AZURE_OPENAI_DEPLOYMENT_NAME")
+        if auth_mode == "entra"
+        else env.get("CODEXY_MODEL") or stored_config.get("model")
+    )
     model = (
         stored_model.strip()
         if stored_model and stored_model.strip()
-        else (DEFAULT_FULL_CONTEXT_MODEL if is_full_context else DEFAULT_AGENTIC_MODEL)
+        else ("" if auth_mode == "entra" else (DEFAULT_FULL_CONTEXT_MODEL if is_full_context else DEFAULT_AGENTIC_MODEL))
     )
 
     loaded_history_config = stored_config.get("history") or {}
@@ -285,7 +327,7 @@ def load_config(
     }
 
     # Validate and set user's preferred approval mode, defaulting to SUGGEST
-    approval_mode_str = stored_config.get("approval_mode", DEFAULT_APPROVAL_MODE) or DEFAULT_APPROVAL_MODE
+    approval_mode_str = env.get("CODEXY_APPROVAL_MODE") or stored_config.get("approval_mode") or DEFAULT_APPROVAL_MODE
     try:
         _ = ApprovalMode(approval_mode_str)
         user_preferred_approval_mode = approval_mode_str
@@ -334,21 +376,33 @@ def load_config(
 
     # --- Final AppConfig Assembly ---
     app_config: AppConfig = {
-        "api_key": OPENAI_API_KEY or None,
+        "auth_mode": auth_mode,
+        "azure_cli_command": env.get("AZURE_CLI_COMMAND") or "az",
+        "azure_tenant_id": env.get("AZURE_TENANT_ID") or None,
+        "azure_subscription_id": env.get("AZURE_SUBSCRIPTION_ID") or None,
+        "azure_config_dir": env.get("AZURE_CONFIG_DIR") or None,
+        "azure_token_resource": env.get("AZURE_TOKEN_RESOURCE") or "https://cognitiveservices.azure.com/",
+        "cwd": str(current_cwd),
+        "check_updates": env_bool("CODEXY_CHECK_UPDATES", False),
+        "api_key": env.get("OPENAI_API_KEY") or None,
         "model": model,
         "instructions": combined_instructions,
         "full_auto_error_mode": full_auto_error_mode,
         "memory": runtime_memory,  # Use the processed memory config
-        "notify": stored_config.get("notify", DEFAULT_NOTIFY) or False,
+        "notify": env_bool("CODEXY_NOTIFY", stored_config.get("notify", DEFAULT_NOTIFY) or False),
         "history": runtime_history,
         "safe_commands": safe_commands,
         "effective_approval_mode": user_preferred_approval_mode,
         # Runtime flags from function args
         "flex_mode": flex_mode,
-        "full_stdout": full_stdout,
+        "full_stdout": env_bool("CODEXY_FULL_STDOUT", DEFAULT_FULL_STDOUT) if full_stdout is None else full_stdout,
         "writable_roots": [],  # Initial empty, filled later by CLI
-        "base_url": OPENAI_BASE_URL or None,
-        "timeout": OPENAI_TIMEOUT_MS / 1000.0 if OPENAI_TIMEOUT_MS else None,
+        "base_url": (
+            normalize_foundry_endpoint(env.get("AZURE_OPENAI_ENDPOINT"))
+            if auth_mode == "entra"
+            else env.get("OPENAI_BASE_URL") or None
+        ),
+        "timeout": timeout_ms / 1000.0,
     }
 
     # --- First Run Bootstrap ---

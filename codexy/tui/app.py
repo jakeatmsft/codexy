@@ -11,13 +11,11 @@ from textual.reactive import reactive
 from textual.timer import Timer
 from textual.widgets import Footer, ListView
 
-from .. import PACKAGE_NAME
 from ..approvals import ApprovalMode, add_to_always_approved, can_auto_approve
 from ..config import AppConfig, load_config
 from ..core.agent import Agent, StreamEvent
 from ..utils.filesystem import check_in_git
 from ..utils.model_info import get_max_tokens_for_model
-from ..utils.model_utils import get_available_models
 from ..utils.storage import (
     DEFAULT_HISTORY_CONFIG,
     HistoryEntry,
@@ -253,13 +251,14 @@ class CodexTuiApp(App[None]):
             self.exit(message="Error: App config failed to load.")
             return
 
-        self.agent = Agent(self.app_config)
-        if self.agent:
-            # Generate a session ID if one doesn't exist (e.g., from config)
-            self.agent.session_id = self.app_config.get("sessionId")  # or generate_session_id() # Requires a helper
-            # If session ID generation is needed, you'd define a function like:
-            # import uuid
-            # def generate_session_id(): return str(uuid.uuid4())
+        try:
+            self.agent = Agent(self.app_config)
+            await self.agent.initialize()
+        except Exception as exc:
+            if self.agent:
+                await self.agent.close()
+            self.exit(return_code=1, message=f"Could not initialize agent: {exc}")
+            return
 
         self.current_model = self.agent.config["model"]
 
@@ -289,7 +288,8 @@ class CodexTuiApp(App[None]):
         self.command_history = load_command_history()
         self.query_one(ChatInputArea).set_history(self.command_history)
 
-        self.run_worker(self.run_update_check(), group="update_check", name="Update Checker")
+        if self.app_config.get("check_updates", False):
+            self.run_worker(self.run_update_check(), group="update_check", name="Update Checker")
         self.run_worker(self.load_available_models(), group="init_load", name="Model Loader")
 
         if self.initial_prompt:
@@ -302,6 +302,10 @@ class CodexTuiApp(App[None]):
 
         if not self.is_loading:
             self.call_later(self.query_one(ChatInputArea).focus_input)
+
+    async def on_unmount(self) -> None:
+        if self.agent:
+            await self.agent.close()
 
     async def run_update_check(self):
         """Worker function to perform the update check."""
@@ -318,7 +322,7 @@ class CodexTuiApp(App[None]):
             return
         self._fetching_models = True
         try:
-            models = await get_available_models(self.agent.async_client)
+            models = await self.agent.get_available_models()
             if models:
                 self.call_later(setattr, self, "available_models", models)
             else:
@@ -330,7 +334,7 @@ class CodexTuiApp(App[None]):
 
     def _notify_update(self, update_info: UpdateInfo):
         """Displays the update notification."""
-        message = f"Update available! {update_info['current_version']} -> {update_info['latest_version']}.\nRun: [b]pip install --upgrade {PACKAGE_NAME}[/b]"
+        message = f"Update available! {update_info['current_version']} -> {update_info['latest_version']}.\nUpdate your checkout and run [b]python -m pip install --no-deps -e .[/b]"
         self.notify(
             message,
             title="codexy Update",

@@ -8,7 +8,7 @@ import click
 from rich.console import Console
 
 from ..approvals import ApprovalMode
-from ..config import DEFAULT_FULL_STDOUT, INSTRUCTIONS_FILEPATH, AppConfig, load_config
+from ..config import INSTRUCTIONS_FILEPATH, AppConfig, load_config
 from ..tui import CodexTuiApp
 from .completion_scripts import _COMPLETION_SCRIPTS
 
@@ -17,7 +17,7 @@ stderr_console = Console(stderr=True)
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(package_name="codexy")
-@click.option("--model", "-m", help="Model to use for completions (e.g., o4-mini).")
+@click.option("--model", "-m", help="Model or Foundry deployment name (overrides .env).")
 @click.option(
     "--image",
     "-i",
@@ -58,7 +58,7 @@ stderr_console = Console(stderr=True)
 @click.option(
     "--full-stdout",
     is_flag=True,
-    default=DEFAULT_FULL_STDOUT,
+    default=None,
     help="Do not truncate stdout/stderr from command outputs.",  # Updated help text
 )
 @click.option(
@@ -92,7 +92,7 @@ def codexy(
     full_auto: bool,
     no_project_doc: bool,
     project_doc: str | None,
-    full_stdout: bool,
+    full_stdout: bool | None,
     notify: bool | None,
     flex_mode: bool,
     dangerously_auto_approve_everything: bool,
@@ -165,7 +165,7 @@ def run_repl(
     full_auto: bool,
     no_project_doc: bool,
     project_doc: str | None,
-    full_stdout: bool,  # Added parameter
+    full_stdout: bool | None,  # Added parameter
     notify: bool | None,
     flex_mode: bool,  # Added parameter
     dangerously_auto_approve_everything: bool,
@@ -211,8 +211,6 @@ def run_repl(
         if notify is not None:  # Check for None explicitly
             app_config["notify"] = notify
 
-        app_config["full_stdout"] = full_stdout
-
         # Determine the final approval mode based on CLI flags and config
         effective_mode = ApprovalMode(app_config["effective_approval_mode"])
 
@@ -254,16 +252,16 @@ def run_repl(
         stderr_console.print("Full context mode is not implemented yet.")
         sys.exit(1)
 
-    # --- API Key Check ---
-    # Check API key *after* loading config, as it might be set there
-    # (although current load_config doesn't load it from file, only env)
-    if not app_config.get("api_key"):
-        stderr_console.print(
-            "\n[bold red]Missing OpenAI API key.[/bold red]\n\n"
-            "Set the environment variable [bold]OPENAI_API_KEY[/bold] or place it in a [bold].env[/bold] file.\n"
-            "Create a key at: [link=https://platform.openai.com/account/api-keys]https://platform.openai.com/account/api-keys[/link]\n"
+    if app_config["auth_mode"] == "entra":
+        if not app_config.get("base_url"):
+            raise click.ClickException("Set AZURE_OPENAI_ENDPOINT in .env to your Foundry resource endpoint.")
+        if not app_config.get("model"):
+            raise click.ClickException("Set AZURE_OPENAI_DEPLOYMENT_NAME in .env or supply --model with your deployment name.")
+
+    if app_config["auth_mode"] == "api-key" and not app_config.get("api_key"):
+        raise click.ClickException(
+            "Set OPENAI_API_KEY in .env, or use CODEXY_AUTH_MODE=entra for Microsoft Entra authentication."
         )
-        sys.exit(1)
 
     # --- Start Textual TUI ---
     try:

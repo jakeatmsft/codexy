@@ -16,7 +16,7 @@ classifiers = [
 dependencies = [
   "click>=8.0",
   "PyYAML>=6.0",
-  "openai>=1.0",
+  "openai>=1.75.0",
   "rich>=13.0",
   "detect-secrets>=1.5.0",
   "textual",

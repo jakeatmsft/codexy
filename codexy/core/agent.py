@@ -3,7 +3,6 @@
 import asyncio
 import inspect
 import json
-import os
 import sys
 import traceback
 import uuid
@@ -11,6 +10,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+import httpx
 from openai import (
     APIConnectionError,
     APIError,
@@ -32,6 +32,7 @@ from openai.types.chat.chat_completion_content_part_param import ChatCompletionC
 from openai.types.chat.chat_completion_content_part_text_param import ChatCompletionContentPartTextParam
 from openai.types.chat.chat_completion_message_tool_call import Function as OpenAIFunction
 
+from ..auth import AzureCliTokenProvider, EntraBearerAuth
 from ..config import (
     DEFAULT_FULL_STDOUT,
     DEFAULT_MEMORY_COMPRESSION_THRESHOLD_FACTOR,
@@ -42,6 +43,7 @@ from ..config import (
 from ..tools import AVAILABLE_TOOL_DEFS, TOOL_REGISTRY
 from ..utils import get_model_max_tokens  # Use the new centralized function
 from ..utils.token_utils import approximate_tokens_used
+from .foundry import FoundryResponses
 
 # Constants for retry logic
 MAX_RETRIES = 5
@@ -80,20 +82,22 @@ class Agent:
 
     def __init__(self, config: AppConfig):
         self.config = config
-        # Ensure API key is fetched correctly, considering potential None
-        api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            # Handle missing API key scenario, perhaps raise an error or log warning
-            print("Warning: OpenAI API key is not configured.", file=sys.stderr)
-            # Depending on desired behavior, you might raise an exception here
-            # raise ValueError("OpenAI API key is required.")
-
+        self.token_provider = None
+        client_options = {}
+        if config.get("auth_mode") == "entra":
+            if not config.get("base_url"):
+                raise ValueError("Set AZURE_OPENAI_ENDPOINT in .env to your Foundry resource endpoint.")
+            self.token_provider = AzureCliTokenProvider(config)
+            client_options["http_client"] = httpx.AsyncClient(auth=EntraBearerAuth(self.token_provider))
         self.async_client = AsyncOpenAI(
-            api_key=api_key,  # Pass the resolved API key
-            base_url=config.get("base_url") or os.environ.get("OPENAI_BASE_URL"),
-            timeout=config.get("timeout") or float(os.environ.get("OPENAI_TIMEOUT_MS", 60000)) / 1000.0,
-            max_retries=0,  # Disable automatic retries in the client, we handle it manually
+            # httpx replaces this placeholder with a fresh Entra bearer token.
+            api_key="entra-managed" if self.token_provider else config.get("api_key"),
+            base_url=config.get("base_url"),
+            timeout=config.get("timeout") or 60.0,
+            max_retries=0,
+            **client_options,
         )
+        self.foundry = FoundryResponses(self.async_client) if self.token_provider else None
         self.history: list[ChatCompletionMessageParam] = []
         self.available_tools: list[ChatCompletionToolParam] = AVAILABLE_TOOL_DEFS
         self._cancelled: bool = False
@@ -102,6 +106,22 @@ class Agent:
         self.pending_tool_calls: list[ChatCompletionMessageToolCall] | None = None
         self.last_response_id: str | None = None  # Track the last response ID
         self.compression_attempted_this_turn: bool = False
+
+    async def initialize(self):
+        """Check Entra login before starting the interactive session."""
+        if self.token_provider:
+            await self.token_provider.get_token()
+
+    async def get_available_models(self) -> list[str]:
+        if self.token_provider:
+            # Foundry requests use deployment names, not the public model catalog.
+            return [self.config["model"]]
+        from ..utils.model_utils import get_available_models
+
+        return await get_available_models(self.async_client)
+
+    async def close(self):
+        await self.async_client.close()
 
     def _compress_history(self, max_tokens: int):  # max_tokens is not directly used in this simple compression
         memory_config = self.config.get("memory")
@@ -170,6 +190,8 @@ class Agent:
     def clear_history(self):
         """Clears the in-memory conversation history for the agent."""
         self.history = []
+        if self.foundry:
+            self.foundry.clear()
         self.pending_tool_calls = None
         self.last_response_id = None  # Clear last response ID too
         print("[Agent] In-memory conversation history cleared.", file=sys.stderr)
@@ -389,18 +411,25 @@ class Agent:
                 yield create_stream_event(type="cancelled", content="Cancelled before API retry.")
                 return
 
+            stream = None
             try:
                 print(f"[Agent] Attempt {attempt + 1}/{MAX_RETRIES} sending request...", file=sys.stderr)
-                stream = await self.async_client.chat.completions.create(
-                    model=self.config["model"],
-                    messages=api_messages,
-                    tools=self.available_tools,
-                    tool_choice="auto",
-                    stream=True,
-                    service_tier=service_tier,
-                    # --- Added experimental feature ---
-                    # stream_options={"include_usage": True}, # Uncomment if needed later
-                )
+                if self.foundry:
+                    stream = await self.foundry.create_stream(
+                        model=self.config["model"],
+                        messages=api_messages,
+                        tools=self.available_tools,
+                        service_tier=service_tier,
+                    )
+                else:
+                    stream = await self.async_client.chat.completions.create(
+                        model=self.config["model"],
+                        messages=api_messages,
+                        tools=self.available_tools,
+                        tool_choice="auto",
+                        stream=True,
+                        service_tier=service_tier,
+                    )
                 self._current_stream = stream
                 print("[Agent] Stream connection established.", file=sys.stderr)
 
@@ -652,6 +681,10 @@ class Agent:
                 else:
                     yield create_stream_event(type="error", content=f"Error: Failed after unexpected error: {e}")
                     return
+
+            finally:
+                if self.foundry and stream is not None:
+                    await stream.aclose()
 
         # If loop finishes without returning (all retries failed)
         yield create_stream_event(

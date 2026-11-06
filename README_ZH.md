@@ -9,7 +9,7 @@
   <b>中文</b> | <a href="README.md">English</a>
 </p>
 
-<p align="center"><code>pip install -U codexy</code></p>
+<p align="center"><code>python -m pip install -e .</code></p>
 
 ![Codexy demo GIF](./assets/codexy-demo.gif)
 
@@ -58,53 +58,48 @@ Codexy (Codex CLI 的 Python 实现) 是一个正在积极开发中的实验性�
 
 ## 快速开始
 
-使用 pip 全局安装：
+使用 Python 3.10+ 和 pip 安装当前源码：
 
 ```shell
-pip install -U codexy
+python -m pip install -e .
+python -m codexy
 ```
 
-接下来，设置您的 OpenAI API 密钥作为环境变量：
+没有新增 Python 依赖；现有 OpenAI SDK 需要 1.75+ 版本以支持 Responses API。
+已有全部依赖时，可运行 `python -m pip install --no-deps -e .` 只安装本项目。
+不需要 uv 或 Codex CLI。Linux/WSL 可使用 `python3`，Windows 可使用 `py`。
+
+首次配置时将 `.env.example` 复制为 `.env`，设置 Foundry 资源地址和部署名称：
+
+```dotenv
+CODEXY_AUTH_MODE=entra
+AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT_NAME=YOUR-DEPLOYMENT
+CODEXY_APPROVAL_MODE=suggest
+OPENAI_TIMEOUT_MS=60000
+CODEXY_CHECK_UPDATES=false
+```
+
+支持 `.openai.azure.com` 或 `.services.ai.azure.com` 资源根地址，
+也支持完整的 `/openai/v1/` 基础地址。不要使用项目地址或特定部署的请求地址。
+部署需要支持 Responses API、流式输出和函数工具调用；工具执行和批准仍由 Python 应用管理。
+
+通过已有的 Azure CLI 登录 Microsoft Entra：
 
 ```shell
-export OPENAI_API_KEY="你的-API-密钥"
-# 可选：为 OpenAI API 设置自定义基础 URL（例如，用于代理或自托管服务）
-# export OPENAI_BASE_URL="你的自定义基础URL"
-# 可选：设置 API 请求超时时间（毫秒）
-# export OPENAI_TIMEOUT_MS="300000" # 例如：300000 代表 5 分钟
+az login
+python -m codexy
 ```
 
-> **注意:** 此命令仅为当前终端会话设置密钥。要使其永久生效，请将 `export` 行添加到您的 shell 配置文件中（例如 `~/.zshrc`、`~/.bashrc`）。
->
-> **提示:** 您也可以将 API 密钥和其他环境变量放在项目根目录下的 `.env` 文件中：
->
-> ```env
-> OPENAI_API_KEY=你的-API-密钥
-> # 可选:
-> # OPENAI_BASE_URL=你的自定义基础URL
-> # OPENAI_TIMEOUT_MS=300000
-> ```
->
-> CLI 将使用 `python-dotenv` 自动加载 `.env` 文件中的变量。
+登录身份需要部署调用权限，例如资源上的 **Cognitive Services OpenAI User** 角色。
+程序调用 `az account get-access-token` 获取令牌，在内存中缓存并在到期前刷新，
+401 后最多刷新重试一次；不会将令牌写入 `.env`，也不会使用 Codex 的登录。
+可在 `.env` 中配置 `AZURE_TENANT_ID`、`AZURE_SUBSCRIPTION_ID`、`AZURE_CONFIG_DIR`、
+`AZURE_CLI_COMMAND` 和 `AZURE_TOKEN_RESOURCE`。
 
-以交互模式运行：
-
-```shell
-codexy
-```
-
-或者，将提示作为输入运行（并可选择 `Full Auto` 模式）：
-
-```shell
-codexy "请解释一下这个代码库"
-```
-
-```shell
-# 请谨慎使用自动批准模式
-codexy --approval-mode full-auto "创建一个最炫酷的待办事项列表应用"
-```
-
-就是这样 – Codexy 将与 OpenAI API 交互，建议文件更改或命令，并（根据您的批准模式）执行它们。
+如需使用普通 API 密钥，设置 `CODEXY_AUTH_MODE=api-key`、`OPENAI_API_KEY` 和 `CODEXY_MODEL`。
+环境配置优先级和完整选项见 [英文说明](README.md#quickstart)。
+`.env` 已被 Git 忽略，默认关闭 PyPI 更新检查。
 
 ---
 
@@ -146,7 +141,8 @@ Codexy 允许您通过 `--approval-mode` 标志（或配置文件）决定代理
 | ------------ | ------------------------------------------ |
 | 操作系统     | Linux, macOS, Windows (跨平台)             |
 | Python       | **3.10 或更高版本** (见 `pyproject.toml`) |
-| Pip          | 用于安装                                   |
+| pip          | 本地安装源码                               |
+| Azure CLI    | Microsoft Entra 认证需要                   |
 | Git (可选)   | 推荐用于安全保障                           |
 | 依赖项       | `click`, `textual`, `openai` 等            |
 
